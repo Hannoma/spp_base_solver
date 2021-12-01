@@ -1,6 +1,7 @@
 pub mod solver;
 pub mod config;
 
+use std::collections::VecDeque;
 use std::thread;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -17,13 +18,13 @@ pub fn main<R: 'static + Clone + std::marker::Send, T: 'static + std::marker::Se
         let input = S::parse_input();
 
         // Save channels of threads to receive their messages later
-        let mut channels = Vec::with_capacity(config.num_threads as usize);
+        let mut channels = VecDeque::with_capacity(config.num_threads as usize);
 
         // Spawn all threads
         for _ in 0..config.num_threads {
             // Create new channel and save it
             let (sender, receiver) = mpsc::channel();
-            channels.push(receiver);
+            channels.push_back(receiver);
             // Clone input
             let cloned_input = input.clone();
             // Spawn new thread
@@ -32,24 +33,45 @@ pub fn main<R: 'static + Clone + std::marker::Send, T: 'static + std::marker::Se
             });
         }
 
+        println!("Spawned all {} threads at {:?}", config.num_threads, now.elapsed());
         let mut best_solution = None;
         let mut best_weight: u64 = 0;
 
         // Wait for solutions
         while now.elapsed().as_secs() < (config.run_time - 2) as u64 {
-            for receiver in channels.iter() {
+            if let Some(receiver) = channels.pop_front() {
                 if let Ok(outcome) = receiver.try_recv() {
+                    println!("Thread finished at {:?}", now.elapsed());
                     if let Some(_) = best_solution {
                         if config.maximize_weight && outcome.weight > best_weight ||
                             !config.maximize_weight && outcome.weight < best_weight {
                             best_solution = Some(outcome.solution);
                             best_weight = outcome.weight;
+                            println!("Solution is better with weight {}", best_weight);
                         }
                     } else {
                         best_solution = Some(outcome.solution);
                         best_weight = outcome.weight;
                     }
+                    if config.restart_threads {
+                        // Create new channel and save it
+                        let (sender, new_receiver) = mpsc::channel();
+                        channels.push_back(new_receiver);
+                        // Clone input
+                        let cloned_input = input.clone();
+                        // Spawn new thread
+                        thread::spawn(move || {
+                            sender.send(S::solve(&cloned_input)).ok();
+                        });
+                        println!("Successfully restarted thread")
+                    }
+                } else {
+                    // Thread not finished yet
+                    channels.push_back(receiver);
                 }
+            } else {
+                println!("Breaking main loop because there are no more threads running");
+                break;
             }
         }
 
@@ -57,15 +79,21 @@ pub fn main<R: 'static + Clone + std::marker::Send, T: 'static + std::marker::Se
         let solution = S::format_solution(&best_solution.expect("Not found any solutions in time ;("));
         // Print and write file
         print_and_save_string(solution);
+
+        println!("Successfully solved input");
+        println!();
+        println!("Weight: {}", best_weight);
+        println!("Elapsed: {} milliseconds", now.elapsed().as_millis());
     } else {
         // Here can stand verbose code
         let input = S::parse_input();
         let outcome= S::solve(&input);
 
-        println!("Successfully solved input");
         let solution = S::format_solution(&outcome.solution);
         // Print and write file
         print_and_save_string(solution);
+
+        println!("Successfully solved input");
         println!();
         println!("Weight: {}", outcome.weight);
         println!("Elapsed: {} milliseconds", now.elapsed().as_millis());
