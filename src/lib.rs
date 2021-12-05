@@ -6,11 +6,14 @@ use std::thread;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::mpsc;
-use std::time::Instant;
+use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 use config::Config;
-use crate::solver::Solver;
+use crate::solver::{Outcome, Solver};
 
-pub fn main<R: 'static + Clone + std::marker::Send, T: 'static + std::marker::Send, S: Solver<R, T>>(config: Config, _solver: S) {
+pub fn main<ParsedInput: 'static + Clone + Send, Solution: 'static + Send, 
+    S: Solver<ParsedInput, Solution>>
+(config: Config, _solver: S) {
     // Start timer for run time analysis or stopping in time in battle mode
     let now = Instant::now();
 
@@ -98,6 +101,79 @@ pub fn main<R: 'static + Clone + std::marker::Send, T: 'static + std::marker::Se
         println!("Weight: {}", outcome.weight);
         println!("Elapsed: {} milliseconds", now.elapsed().as_millis());
     }
+}
+
+pub fn register_solver<ParsedInput: 'static + Clone + Send, Solution: 'static + Send,
+    S: Solver<ParsedInput, Solution>>
+(sender: Sender<Outcome<Solution>>, _solver: S, num_threads: u8, restart_threads: bool){
+    // Parse input and use it for all executions of this solver
+    let input = S::parse_input();
+    
+    // Spawn all threads
+    for _ in 0..num_threads {
+        // Clone input
+        let cloned_input = input.clone();
+        let cloned_sender = sender.clone();
+        // Spawn new thread
+        thread::spawn(move || {
+            loop {
+                // Send calculated solution
+                cloned_sender.send(S::solve(&cloned_input)).ok();
+                // Break if we do not want to restart threads of this solver
+                if !restart_threads {
+                    break;
+                }
+            }            
+        });
+    }
+}
+
+pub fn multiple_solvers<Solution: 'static + Send>
+(solvers: Vec<fn(Sender<Outcome<Solution>>)>, formatter: fn(&Solution) -> String, 
+ total_runtime: u16, maximize_weight: bool) {
+    // Start timer for run time analysis or stopping in time in battle mode
+    let now = Instant::now();
+    
+    let mut channels = Vec::with_capacity(solvers.len());
+    for solver in solvers {
+        // Create new channel and save it
+        let (sender, receiver) = mpsc::channel();
+        channels.push(receiver);
+        // Spawn new thread
+        thread::spawn(move || {
+            solver(sender)
+        });
+    }
+    let mut best_solution: Option<Solution> = None;
+    let mut best_weight: u64 = 0;
+    while now.elapsed().as_secs() < total_runtime as u64 {
+        for receiver in channels.iter() {
+            if let Ok(outcome) = receiver.try_recv() {
+                println!("Received solution from a solver");
+                if let Some(_) = best_solution {
+                    if maximize_weight && outcome.weight > best_weight ||
+                        !maximize_weight && outcome.weight < best_weight {
+                        best_solution = Some(outcome.solution);
+                        best_weight = outcome.weight;
+                    }
+                } else {
+                    best_solution = Some(outcome.solution);
+                    best_weight = outcome.weight;
+                }
+            }
+        }
+        // Delay to unblock thread
+        thread::sleep(Duration::from_millis(500));
+    }
+    // Format solution
+    let solution = formatter(&best_solution.expect("Not found any solutions in time ;("));
+    // Print and write file
+    print_and_save_string(solution);
+
+    println!("Successfully solved input");
+    println!();
+    println!("Weight: {}", best_weight);
+    println!("Elapsed: {} milliseconds", now.elapsed().as_millis());
 }
 
 fn print_and_save_string(out: String) {
